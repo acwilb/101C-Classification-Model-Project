@@ -1,0 +1,297 @@
+---
+title: "101C Project"
+author: "Alison Wilbur"
+date: "2023-12-05"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE)
+
+library(tidyverse) # Reading in Data
+library(gbm) # Gradient Boost
+library(randomForest) # Random Forest
+
+library(Hmisc) # Imputing NAs
+library(factoextra) # PCA visualization
+library(caret) # Logistic Regression
+library(neuralnet) #Neural Net
+```
+
+## Setting up the data
+```{r Reading in Data}
+# Reading in project data 
+SA.Train <- read.csv("TrainSAData2.csv")
+SA.Test <- read.csv("TestSAData2NoY.csv")
+
+# Seeing NAs
+sum(is.na(SA.Train))
+sum(is.na(SA.Test))
+
+# Remove ID column
+SA.Train <- SA.Train[,-1]
+SA.Test <- SA.Test[,-1]
+
+# Character to factor
+SA.Train <- SA.Train %>% mutate_if(is.character, as.factor)
+SA.Test <- SA.Test %>% mutate_if(is.character, as.factor)
+
+head(SA.Train)
+head(SA.Test)
+```
+
+***
+
+# Best Models: Random Forest and GBM
+
+## Trying Random Forest, imputing NAs with randomForest package (column medians for numerical predictors and modes for categorical predictors)
+```{r RF impute NA}
+set.seed(127)
+
+SA.rf.impute.tr <- na.roughfix(SA.Train)
+SA.rf.impute.ts <- na.roughfix(SA.Test)
+# 
+SA.RF.orig <- randomForest(Alcoholic.Status~., data=SA.rf.impute.tr, importance = TRUE, ntree = 1000)
+SA.RF.orig
+```
+OOB 27.4%  
+Kaggle: 72.953
+
+```{r RF impute NA Test}
+predRF <- predict(SA.RF.orig, newdata = SA.rf.impute.ts, type="class")
+solution <- data.frame("ID" = c(1:30000), Alcoholic.Status=predRF)
+write.csv(solution, row.names = FALSE, 'RFnewsolution2.csv')
+```
+
+## Adjusting the Random Forest
+
+```{r mtry}
+y <- SA.rf.impute.tr[,27]
+x <- SA.rf.impute.tr[,1:26]
+
+bestmtry <- tuneRF(x, y, ntree=1000, stepFactor = 1.5, improve = 0.01, trace=TRUE)
+bestmtry
+```
+
+```{r RF Adjusting}
+SA.RF.orig2 <- randomForest(Alcoholic.Status~., data=SA.rf.impute.tr, mtry=4, ntree=2000)
+SA.RF.orig2
+```
+
+```{r RF Adjusting Test}
+predRF <- predict(SA.RF.orig2, newdata = SA.rf.impute.ts, type="class")
+solution <- data.frame("ID" = c(1:30000), Alcoholic.Status=predRF)
+write.csv(solution, row.names = FALSE, 'RFnewsolution3.csv')
+```
+OOB 27.26%  
+Kaggle: 72.816
+
+Highest Accuracy comes from Random Forest model with mtry = 5, ntrees = 1000.
+
+## Trying GBM with original data (keeping NA values)
+```{r GBM original data}
+
+# New response column
+SA.Train$Alcoholic.Status.Y <- ifelse(SA.Train$Alcoholic.Status == "Y", 1, 0)
+
+set.seed(127)
+
+SA.GBM.orig <- gbm(
+  Alcoholic.Status.Y~.,
+  data = SA.Train[,-27],
+  distribution = "bernoulli",
+  n.trees = 2500,
+  interaction.depth = 6
+  )
+summary(SA.GBM.orig)
+```
+
+```{r GBM Test}
+# Training data
+pred.GB1 <- predict(SA.GBM.orig,data=SA.Train[,-27],n.trees = 2500, type="response")
+P.bo <- ifelse(pred.GB1<0.5,0,1)
+
+table(SA.Train$Alcoholic.Status.Y,P.bo)
+mean(SA.Train$Alcoholic.Status.Y!=P.bo)
+
+# Testing data
+pred.bo.t <- predict(SA.GBM.orig,newdata=SA.Test,n.trees = 2500, type="response")
+P.bo.t <- ifelse(pred.bo.t<0.5,0,1)
+P.bo.t <- ifelse(P.bo.t == 0, "N", "Y")
+
+solution <- data.frame("ID" = c(1:30000), Alcoholic.Status=P.bo.t)
+write.csv(solution, row.names = FALSE, 'newGBMsolution.csv')
+```
+Training data accuracy: 81.65
+Kaggle test data accuracy: 72.27
+
+***
+
+# Other Methods Tried
+
+## Imputing NA values using column means, Hmisc package
+```{r Dealing with NAs}
+# Replace NAs with mean of each col
+for (i in 1:27){
+  SA.Train[,i] <- impute(SA.Train[,i], mean)
+}
+for(i in 1:26){
+  SA.Test[,i] <- impute(SA.Test[,i], mean)
+}
+
+head(SA.Train)
+```
+
+## Creating Dummy Variables
+```{r Dummy Variables}
+SA.Train$sex.Male <- ifelse(SA.Train$sex == "Male", 1, 0)
+SA.Train$hear_left.Normal <- ifelse(SA.Train$hear_left == "Normal", 1, 0)
+SA.Train$hear_right.Normal <- ifelse(SA.Train$hear_right == "Normal", 1, 0)
+SA.Train$BMI.Healthy <- ifelse(SA.Train$BMI.Category == "Healthy", 1, 0)
+SA.Train$AGE.YoungToMid <- ifelse(SA.Train$AGE.Category == "Young" | SA.Train$AGE.Category == "Mid-aged", 1, 0)
+SA.Train$NeverSmoked <- ifelse(SA.Train$Smoking.Status =="Never Smoked", 1, 0)
+
+SA.Test$sex.Male <- ifelse(SA.Test$sex == "Male", 1, 0)
+SA.Test$hear_left.Normal <- ifelse(SA.Test$hear_left == "Normal", 1, 0)
+SA.Test$hear_right.Normal <- ifelse(SA.Test$hear_right == "Normal", 1, 0)
+SA.Test$BMI.Healthy <- ifelse(SA.Test$BMI.Category == "Healthy", 1, 0)
+SA.Test$AGE.YoungToMid <- ifelse(SA.Test$AGE.Category == "Young" | SA.Test$AGE.Category == "Mid-aged", 1, 0)
+SA.Test$NeverSmoked <- ifelse(SA.Test$Smoking.Status =="Never Smoked", 1, 0)
+
+SA.Train <- SA.Train[,-c(1, 8, 9, 24, 25, 26, 27)]
+SA.Test <- SA.Test[,-c(1, 8, 9, 24, 25, 26)]
+
+head(SA.Train)
+```
+
+## Numeric Variable Selection: PCA
+```{r PCA for Variable Selection}
+# Principle components of the data
+SA.comp <- princomp(SA.Train, scale=TRUE)
+summary(SA.comp)
+SA.comp$loadings[,1:4]
+```
+After computing the PCA for the training data, the results show that that first 4 principal components are the most significant since they explain almost 90% of the total variance.
+
+```{r PCA Viz}
+# Scree plot
+fviz_eig(SA.comp, addlabels = TRUE)
+
+# Viz to see how much each variable contributes to the 4 components
+fviz_cos2(SA.comp, choice="var", axes=1:4)
+```
+The scree plot visualizes the importance of each principal component, and the cos2 visualization shows how much each variable contributes to the 4 most significant principal components.  
+\
+From this visualization, triglyceride, gamma_GTP, tot_chole, LDL_chole, SGOT_ALT, and SGOT_AST appear to be the most significant predictors in the data set.
+
+## New Data Frame with Selected Predictors
+```{r Subsetting Selected Predictors}
+# New SA.Train
+SA.Train.sel <- data.frame(
+  # Selected numeric predictors
+  Triglyceride = SA.Train$triglyceride,
+  Gamma.GTP = SA.Train$gamma_GTP,
+  Tot.Chole = SA.Train$tot_chole,
+  LDL.Chole = SA.Train$LDL_chole,
+  SGOT.ALT = SA.Train$SGOT_ALT,
+  SGOT.AST = SA.Train$SGOT_AST,
+  Alcoholic.Status.Y= SA.Train$Alcoholic.Status.Y,
+  # All categorical predictors
+  sex.Male = SA.Train$sex.Male,
+  hear_left.Normal =SA.Train$hear_left.Normal,
+  hear_right.Normal =SA.Train$hear_right.Normal,
+  BMI.Healthy = SA.Train$BMI.Healthy,
+  AGE.YoungToMid = SA.Train$AGE.YoungToMid,
+  NeverSmoked = SA.Train$NeverSmoked
+)
+
+# New SA.Test
+SA.Test.sel <- data.frame(
+  # Selected numeric predictors
+  Triglyceride = SA.Test$triglyceride,
+  Gamma.GTP = SA.Test$gamma_GTP,
+  Tot.Chole = SA.Test$tot_chole,
+  LDL.Chole = SA.Test$LDL_chole,
+  SGOT.ALT = SA.Test$SGOT_ALT,
+  SGOT.AST = SA.Test$SGOT_AST,
+  # All categorical predictors
+  sex.Male = SA.Test$sex.Male,
+  hear_left.Normal =SA.Test$hear_left.Normal,
+  hear_right.Normal =SA.Test$hear_right.Normal,
+  BMI.Healthy = SA.Test$BMI.Healthy,
+  AGE.YoungToMid = SA.Test$AGE.YoungToMid,
+  NeverSmoked = SA.Test$NeverSmoked
+)
+```
+
+## Categorical Variable Selection: Random Forest
+```{r RF Variable Selection}
+SA.Train.sel$Alcoholic.Status.Y <- as.factor(SA.Train.sel$Alcoholic.Status.Y)
+
+set.seed(124)
+
+SA.RF.VS <- randomForest(Alcoholic.Status.Y~., data = SA.Train.sel, mtry=3, importance = TRUE, ntree = 500)
+SA.RF.VS
+importance(SA.RF.VS)
+varImpPlot(SA.RF.VS)
+```
+Based on the variable importance plot from the Random Forest fit to the training data, the most significant categorical variables are NeverSmoked, sex.Male, and AGE.YoungToMid.
+
+## Updated Data Frame with Selected Predictors
+```{r, Updated Predictors}
+SA.Train.sel <- SA.Train.sel[,-c(9,10,11)]
+SA.Test.sel <- SA.Test.sel[,-c(8,9,10)]
+
+head(SA.Train.sel)
+head(SA.Test.sel)
+```
+
+***
+
+# Building Models using Selected Predictors
+
+## Logstic Regression
+```{r LR Selected Variables}
+SA.LR <- glm(Alcoholic.Status.Y~., data = SA.Train.sel, family="binomial")
+```
+
+```{r LR Selected Variables Test}
+# Training data
+pred.LR <- predict(SA.LR,data=SA.Train.sel, type="response")
+P.bo <- ifelse(pred.LR<0.5,0,1)
+
+# Training Confusion Matrix
+table(SA.Train.sel$Alcoholic.Status.Y,P.bo)
+# Training Error Rate
+mean(SA.Train.sel$Alcoholic.Status.Y!=P.bo)
+```
+Kaggle score: 0.69413
+
+## Random Forest
+```{r RF Selected Variables}
+SA.RF.sel <- randomForest(
+  x = SA.Train.sel[,c("Triglyceride", "Gamma.GTP", "Tot.Chole", "LDL.Chole", "SGOT.ALT", "SGOT.AST", "sex.Male", "AGE.YoungToMid", "NeverSmoked")],
+  y = SA.Train.sel$Alcoholic.Status.Y,
+  mtry = 2,
+  ntree=500,
+  stepFactor=1.5,
+  improve=0.01,
+)
+SA.RF.sel
+```
+
+## Neural Net
+```{r NN Selected Variables, eval=FALSE}
+SA.NN <- neuralnet(
+  Alcoholic.Status.Y ~ .,
+  data = SA.Train.sel,
+  hidden = 5,
+  linear.output=FALSE,
+  lifesign = "full",
+  rep = 2,
+  algorithm = "rprop+",
+  stepmax = 100000
+)
+```
+
